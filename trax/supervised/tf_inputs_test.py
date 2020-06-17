@@ -259,7 +259,9 @@ class TFInputsTest(tf.test.TestCase):
     proc_dataset = tf_inputs.generic_text_dataset_preprocess_fn(
         dataset, spm_path=_spm_path(),
         text_preprocess_fn=t5_processors.squad,
-        copy_plaintext=True)
+        copy_plaintext=True,
+        debug_print_examples=True,
+        debug_print_examples_rate=1.0)
 
     proc_example, = tfds.as_numpy(proc_dataset.take(1))
 
@@ -301,6 +303,37 @@ class TFInputsTest(tf.test.TestCase):
     self.assertEqual(inps.shape[0] % n_devices, 0)
     self.assertEqual(tgts.shape[0] % n_devices, 0)
 
+  def test_filter_dataset_on_len(self):
+    def gen():
+      for i in range(1, 11):
+        yield {
+            'inputs': np.ones((i,), dtype=np.int64),
+            'targets': np.ones((2 * i,), dtype=np.int64),
+        }
+
+    ds = tf.data.Dataset.from_generator(
+        gen,
+        {
+            'inputs': tf.int64,
+            'targets': tf.int64,
+        },
+        {
+            'inputs': tf.TensorShape([None]),
+            'targets': tf.TensorShape([None]),
+        },
+    )
+
+    ds1 = tf_inputs.filter_dataset_on_len(ds, {'inputs': 1, 'targets': 2})
+    self.assertLen(list(ds1.as_numpy_iterator()), 1)
+
+    ds2 = tf_inputs.filter_dataset_on_len(ds, {'inputs': 5, 'targets': 20})
+    self.assertLen(list(ds2.as_numpy_iterator()), 5)
+
+    ds3 = tf_inputs.filter_dataset_on_len(ds, {'inputs': 10, 'targets': 10})
+    self.assertLen(list(ds3.as_numpy_iterator()), 5)
+
+    ds4 = tf_inputs.filter_dataset_on_len(ds, {'inputs': 10, 'targets': 20})
+    self.assertLen(list(ds4.as_numpy_iterator()), 10)
 
 if __name__ == '__main__':
   tf.test.main()

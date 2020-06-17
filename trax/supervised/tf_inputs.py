@@ -116,18 +116,22 @@ def _train_and_eval_streams(dataset, data_dir, preprocess_fn,
   """Return train and eval batches with input name and shape."""
   (train_data, eval_data, keys) = _train_and_eval_dataset(
       dataset, data_dir, eval_holdout_size)
-  if keys is not None:
-    input_names, target_names = keys[0], keys[1]
-  else:
-    input_names, target_names = [input_name], [target_name]
+  # If provided select input_name/target_name else fall back to keys if that is
+  # available, else [None].
+  input_names = ([input_name] if input_name is not None
+                 else keys[0] if keys is not None
+                 else [None])
+  target_names = ([target_name] if target_name is not None
+                  else keys[1] if keys is not None
+                  else [None])
+
   train_batches = _shuffle_data(
       train_data, target_names, True, shuffle_buffer_size, preprocess_fn,
       bare_preprocess_fn)
   eval_batches = _shuffle_data(
       eval_data, target_names, False, shuffle_buffer_size, preprocess_fn,
       bare_preprocess_fn)
-  input_name = input_name or input_names[0]
-  return (train_batches, eval_batches, input_name)
+  return (train_batches, eval_batches, input_names[0])
 
 
 def _shuffle_data(dataset,
@@ -536,16 +540,69 @@ def c4_bare_preprocess_fn(dataset,
 
 
 @gin.configurable(blacklist=['dataset'])
+def filter_dataset_on_len(dataset, len_map=None):
+  """Filters a dataset of lengths given in `len_map`.
+
+  Args:
+    dataset: `tf.data.Dataset` the dataset to filter.
+    len_map: optional dict of str to int, we filter examples where a feature
+      exceeds the given size. Ex: {'inputs': 512, 'targets': 128} will filter
+      out any example where either inputs > 512 or targets > 128.
+
+  Returns:
+    a filtered `tf.data.Dataset`.
+  """
+  if len_map is None:
+    return dataset
+
+  assert isinstance(len_map, dict)
+  for key, max_len in len_map.items():
+    dataset = dataset.filter(lambda x: tf.size(x[key]) <= max_len)
+
+  return dataset
+
+
+@gin.configurable(blacklist=['dataset'])
 def generic_text_dataset_preprocess_fn(dataset,
                                        text_preprocess_fn=None,
+                                       token_preprocess_fn=None,
                                        spm_path=None,
-                                       copy_plaintext=False):
-  """Applies a text preprocess fn and tokenizes the dataset."""
+                                       copy_plaintext=False,
+                                       debug_print_examples=False,
+                                       debug_print_examples_rate=0.01):
+  """Pre-processes, tokenizes and post-processes a `tf.data.Dataset`.
+
+  Args:
+    dataset: `tf.data.Dataset` to process.
+    text_preprocess_fn: None or callable: `tf.data.Dataset` -> `tf.data.Dataset`
+      this operates before tokenization. Typically used to select which fields
+      we want to learn over or change something into "text to text" form.
+    token_preprocess_fn: None or callable: `tf.data.Dataset` ->
+      `tf.data.Dataset`, this operates after tokenization. Since this can view
+      the tokenized fields, this can be used to filter on length etc.
+    spm_path: None or str, path to a sentencepiece model to use for tokenization
+      by default uses the 32k vocabulary from T5.
+    copy_plaintext: bool, if True retains the original fields after
+      tokenization.
+    debug_print_examples: bool, if True this prints examples to the logging
+      stream for inspection, both before and after tokenization.
+    debug_print_examples_rate: float, [0, 1.0], on average this fraction of
+      dataset examples will be printed out in each phase i.e. pre and post
+      tokenization.
+  """
 
   # The assumption is that `text_preprocess_fn` finally gives us a dataset
   # which has `inputs` and `targets`.
   if text_preprocess_fn is not None:
     dataset = text_preprocess_fn(dataset)
+
+  # Print debugging examples if needed before tokenization.
+  if debug_print_examples:
+    def print_examples(x):
+      if np.random.uniform() < debug_print_examples_rate:
+        tf.print(x, output_stream=logging.info)
+      return x
+    dataset = dataset.map(print_examples)
 
   # Vocabulary for tokenization.
   vocab = t5_spc_vocab.SentencePieceVocabulary(
@@ -557,6 +614,20 @@ def generic_text_dataset_preprocess_fn(dataset,
   dataset = t5_utils.encode_string_features(
       dataset, output_features, keys=output_features,
       copy_plaintext=copy_plaintext)
+
+  # Apply the token-preprocessor.
+  if token_preprocess_fn:
+    dataset = token_preprocess_fn(dataset)
+
+  if debug_print_examples:
+    def print_examples_and_shapes(x):
+      if np.random.uniform() < debug_print_examples_rate:
+        tf.print({'inputs_shape': tf.size(x['inputs']),
+                  'targets_shape': tf.size(x['targets']),
+                  'inputs': x['inputs'],
+                  'targets': x['targets'],}, output_stream=logging.info)
+      return x
+    dataset = dataset.map(print_examples_and_shapes)
 
   return dataset
 
